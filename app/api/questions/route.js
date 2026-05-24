@@ -118,6 +118,30 @@ function shouldRetry(response, error) {
   return response.status === 429 || response.status >= 500;
 }
 
+// Converts a model-returned question value into displayable text when possible.
+function normalizeQuestion(question) {
+  if (typeof question === "string") {
+    return question.trim();
+  }
+
+  if (question && typeof question === "object") {
+    const candidates = [
+      question.question,
+      question.text,
+      question.content,
+      question.prompt,
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim()) {
+        return candidate.trim();
+      }
+    }
+  }
+
+  return "";
+}
+
 // Sends the prompt to Groq, retries transient failures, and returns parsed questions.
 async function callGroq(apiKey, options) {
   const body = {
@@ -190,7 +214,7 @@ async function callGroq(apiKey, options) {
           : [];
 
         return questions
-          .map((question) => String(question).trim())
+          .map(normalizeQuestion)
           .filter(Boolean)
           .slice(0, options.count);
       }
