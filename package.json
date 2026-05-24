@@ -2,7 +2,7 @@
   "name": "interview-question-generator",
   "version": "1.0.0",
   "private": true,
-  "description": "Generates three role-specific interview questions for a given job title using Google Gemini.",
+  "description": "Generates role-specific interview questions for a given job title using Groq.",
   "engines": {
     "node": ">=20"
   },

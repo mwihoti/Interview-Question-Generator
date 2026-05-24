@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
-const GEMINI_MODEL = "gemini-2.5-flash";
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 const MAX_TITLE_LENGTH = 120;
 const MIN_COUNT = 1;
@@ -10,13 +10,14 @@ const MAX_COUNT = 10;
 const ALLOWED_LEVELS = new Set(["junior", "mid", "senior"]);
 const ALLOWED_FOCUSES = new Set(["mixed", "behavioral", "technical"]);
 
-const GEMINI_TIMEOUT_MS = 12000;
-const GEMINI_MAX_ATTEMPTS = 3;
+const GROQ_TIMEOUT_MS = 12000;
+const GROQ_MAX_ATTEMPTS = 3;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const RATE_LIMIT_MAX_REQUESTS = 10;
 
 const rateLimitStore = new Map();
 
+// Builds the prompt sent to the model from the validated request options.
 function buildPrompt({ jobTitle, seniority, focus, count }) {
   const focusInstruction =
     focus === "behavioral"
@@ -42,10 +43,12 @@ function buildPrompt({ jobTitle, seniority, focus, count }) {
   ].join("\n");
 }
 
+// Pauses execution between retry attempts to apply exponential backoff.
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Extracts the best available client IP for in-memory rate limiting.
 function getClientIp(request) {
   const forwarded = request.headers.get("x-forwarded-for");
   if (forwarded) {
@@ -54,6 +57,7 @@ function getClientIp(request) {
   return "unknown";
 }
 
+// Tracks request counts per client and returns the current rate-limit state.
 function checkRateLimit(key) {
   const now = Date.now();
   const entry = rateLimitStore.get(key);
@@ -87,10 +91,12 @@ function checkRateLimit(key) {
   };
 }
 
+// Wraps fetch with an abort timeout so upstream calls do not hang indefinitely.
 async function fetchWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
+  // Runs the fetch with an attached abort signal and always clears the timeout after completion.
   try {
     return await fetch(url, { ...options, signal: controller.signal });
   } finally {
@@ -98,6 +104,7 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   }
 }
 
+// Decides whether an upstream failure should be retried.
 function shouldRetry(response, error) {
   if (error?.name === "AbortError") {
     return true;
@@ -111,45 +118,51 @@ function shouldRetry(response, error) {
   return response.status === 429 || response.status >= 500;
 }
 
-async function callGemini(apiKey, options) {
+// Sends the prompt to Groq, retries transient failures, and returns parsed questions.
+async function callGroq(apiKey, options) {
   const body = {
-    contents: [{ parts: [{ text: buildPrompt(options) }] }],
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: "OBJECT",
-        properties: {
-          questions: {
-            type: "ARRAY",
-            items: { type: "STRING" },
-          },
-        },
-        required: ["questions"],
+    model: GROQ_MODEL,
+    messages: [
+      {
+        role: "system",
+        content:
+          "You generate structured interview questions and must return valid JSON only.",
       },
-      temperature: 0.7,
+      {
+        role: "user",
+        content: buildPrompt(options),
+      },
+    ],
+    response_format: {
+      type: "json_object",
     },
+    temperature: 0.7,
   };
 
   let lastError;
 
-  for (let attempt = 1; attempt <= GEMINI_MAX_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; attempt <= GROQ_MAX_ATTEMPTS; attempt += 1) {
     let response;
 
+    // Attempts the upstream Groq call and captures retryable transport or API failures.
     try {
       response = await fetchWithTimeout(
-        `${GEMINI_URL}?key=${encodeURIComponent(apiKey)}`,
+        GROQ_URL,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
           body: JSON.stringify(body),
         },
-        GEMINI_TIMEOUT_MS,
+        GROQ_TIMEOUT_MS,
       );
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => "");
         const error = new Error(
-          `Gemini API error (${response.status}): ${errorText.slice(0, 300) || "no body"}`,
+          `Groq API error (${response.status}): ${errorText.slice(0, 300) || "no body"}`,
         );
 
         if (!shouldRetry(response)) {
@@ -159,16 +172,17 @@ async function callGemini(apiKey, options) {
         lastError = error;
       } else {
         const payload = await response.json();
-        const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
+        const text = payload?.choices?.[0]?.message?.content;
         if (!text) {
-          throw new Error("Gemini response did not contain any text.");
+          throw new Error("Groq response did not contain any text.");
         }
 
         let parsed;
+        // Parses the model's JSON string response into a JavaScript object.
         try {
           parsed = JSON.parse(text);
         } catch {
-          throw new Error("Gemini returned a non-JSON response.");
+          throw new Error("Groq returned a non-JSON response.");
         }
 
         const questions = Array.isArray(parsed.questions)
@@ -182,7 +196,7 @@ async function callGemini(apiKey, options) {
       }
     } catch (error) {
       lastError = error;
-      if (!shouldRetry(response, error) || attempt === GEMINI_MAX_ATTEMPTS) {
+      if (!shouldRetry(response, error) || attempt === GROQ_MAX_ATTEMPTS) {
         break;
       }
     }
@@ -192,9 +206,10 @@ async function callGemini(apiKey, options) {
     await sleep(backoffMs + jitterMs);
   }
 
-  throw lastError || new Error("Gemini request failed.");
+  throw lastError || new Error("Groq request failed.");
 }
 
+// Validates and normalizes the requested question count.
 function parseCount(value) {
   const count = Number.parseInt(String(value), 10);
   if (!Number.isInteger(count) || count < MIN_COUNT || count > MAX_COUNT) {
@@ -203,6 +218,7 @@ function parseCount(value) {
   return count;
 }
 
+// Validates the request body and returns normalized options or an error message.
 function parseOptions(body) {
   const jobTitle =
     typeof body?.jobTitle === "string" ? body.jobTitle.trim() : "";
@@ -246,15 +262,17 @@ function parseOptions(body) {
   };
 }
 
+// Creates a consistent JSON response object for the API route.
 function jsonResponse(body, init) {
   return NextResponse.json(body, init);
 }
 
+// Handles POST requests end-to-end: auth, rate limiting, validation, model call, and response shaping.
 export async function POST(request) {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
     return jsonResponse(
-      { error: "Server is missing the GEMINI_API_KEY environment variable." },
+      { error: "Server is missing the GROQ_API_KEY environment variable." },
       { status: 500 },
     );
   }
@@ -281,6 +299,7 @@ export async function POST(request) {
   }
 
   let body;
+  // Parses the incoming request body and rejects malformed JSON payloads early.
   try {
     body = await request.json();
   } catch {
@@ -302,8 +321,9 @@ export async function POST(request) {
     return response;
   }
 
+  // Calls the model after validation and converts upstream failures into a stable API error.
   try {
-    const questions = await callGemini(apiKey, parsed);
+    const questions = await callGroq(apiKey, parsed);
     if (questions.length < parsed.count) {
       const response = jsonResponse(
         {
