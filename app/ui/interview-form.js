@@ -8,6 +8,7 @@ const INITIAL_FORM = {
   focus: "mixed",
 };
 
+// Renders the interview question form and manages the request lifecycle in the browser.
 export default function InterviewForm() {
   const [form, setForm] = useState(INITIAL_FORM);
   const [status, setStatus] = useState("");
@@ -15,6 +16,7 @@ export default function InterviewForm() {
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
+  // Updates a single form field and clears any previous request feedback.
   function updateField(event) {
     const { name, value } = event.target;
     setError("");
@@ -25,6 +27,7 @@ export default function InterviewForm() {
     }));
   }
 
+  // Sends the current form values to the API and updates the UI with the result.
   async function handleSubmit(event) {
     event.preventDefault();
 
@@ -40,6 +43,7 @@ export default function InterviewForm() {
     setStatus("Generating questions...");
     setIsLoading(true);
 
+    // Submits the form data to the API and validates the response shape before rendering.
     try {
       const response = await fetch("/api/questions", {
         method: "POST",
