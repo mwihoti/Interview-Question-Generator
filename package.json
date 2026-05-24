@@ -1,0 +1,19 @@
+{
+  "name": "interview-question-generator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Generates three role-specific interview questions for a given job title using Google Gemini.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "^16.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}
